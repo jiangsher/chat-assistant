@@ -19,6 +19,8 @@ try {
         --clean `
         --windowed `
         --name $AppName `
+        --collect-data rapidocr_onnxruntime `
+        --collect-binaries onnxruntime `
         --paths src `
         src\recognize\__main__.py
 
