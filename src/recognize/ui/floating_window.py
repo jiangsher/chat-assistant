@@ -81,6 +81,28 @@ class RefreshWorker(QThread):
             self.failed.emit(self.region, str(exc))
 
 
+class AutoDetectWorker(QThread):
+    result_ready = Signal(object, object)
+    failed = Signal(str)
+
+    def __init__(self, pipeline: RecognitionPipeline, captured: CapturedImage) -> None:
+        super().__init__()
+        self.pipeline = pipeline
+        self.captured = captured
+
+    def run(self) -> None:
+        try:
+            detected_result = self.pipeline.run_detected_from_captured(self.captured)
+            if detected_result is None:
+                self.failed.emit("未能自动找到消息列表，请点击“选择区域”手动框选。")
+                return
+            detected, result = detected_result
+            self.result_ready.emit(detected, result)
+        except Exception as exc:  # pragma: no cover - exercised through UI
+            LOGGER.exception("auto_detect_worker_failed")
+            self.failed.emit(str(exc))
+
+
 class FloatingWindow(QWidget):
     def __init__(self, config_store: ConfigStore) -> None:
         super().__init__()
@@ -92,6 +114,7 @@ class FloatingWindow(QWidget):
         self.last_result: RecognitionResult | None = None
         self.last_output_text = ""
         self.refresh_worker: RefreshWorker | None = None
+        self.auto_detect_worker: AutoDetectWorker | None = None
         self.refresh_started_at: float | None = None
         self.refresh_timeout_ms = 10000
         self.capture_in_progress = False
@@ -117,6 +140,7 @@ class FloatingWindow(QWidget):
         self.list_widget.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.refresh_button = QPushButton("刷新")
         self.pause_button = QPushButton("暂停")
+        self.auto_region_button = QPushButton("自动识别")
         self.region_button = QPushButton("选择区域")
         self.copy_button = QPushButton("复制")
         self.debug_button = QPushButton("调试")
@@ -158,7 +182,8 @@ class FloatingWindow(QWidget):
         self.contact_count_label.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.contact_count_label.setCursor(Qt.CursorShape.ArrowCursor)
 
-        self.region_button.setObjectName("PrimaryButton")
+        self.auto_region_button.setObjectName("PrimaryButton")
+        self.region_button.setObjectName("SecondaryButton")
         for button in (
             self.pause_button,
             self.refresh_button,
@@ -167,7 +192,8 @@ class FloatingWindow(QWidget):
         ):
             button.setObjectName("SecondaryButton")
 
-        self.region_button.setToolTip("选择当前页面要识别的列表区域")
+        self.auto_region_button.setToolTip("自动查找当前页面的消息列表")
+        self.region_button.setToolTip("自动识别失败时，手动选择当前页面要识别的列表区域")
         self.pause_button.setToolTip("暂停或继续自动刷新")
         self.refresh_button.setToolTip("立即重新识别当前区域")
         self.copy_button.setToolTip("复制当前未读结果")
@@ -181,6 +207,7 @@ class FloatingWindow(QWidget):
 
         top_row = QHBoxLayout()
         top_row.setSpacing(8)
+        top_row.addWidget(self.auto_region_button)
         top_row.addWidget(self.region_button)
         top_row.addWidget(self.pause_button)
         top_row.addWidget(self.refresh_button)
@@ -210,6 +237,7 @@ class FloatingWindow(QWidget):
 
         self.refresh_button.clicked.connect(self.refresh_once)
         self.pause_button.clicked.connect(self.toggle_pause)
+        self.auto_region_button.clicked.connect(self.auto_detect_region)
         self.region_button.clicked.connect(self.select_region)
         self.copy_button.clicked.connect(self.copy_unread_results)
         self.debug_button.clicked.connect(self.toggle_debug_mode)
@@ -219,6 +247,12 @@ class FloatingWindow(QWidget):
         icon_size = QSize(18, 18)
         self.contact_count_label.setIcon(
             self.style().standardIcon(QStyle.StandardPixmap.SP_FileDialogInfoView)
+        )
+        self.auto_region_button.setIcon(
+            self.style().standardIcon(QStyle.StandardPixmap.SP_ComputerIcon)
+        )
+        self.region_button.setIcon(
+            self.style().standardIcon(QStyle.StandardPixmap.SP_DialogOpenButton)
         )
         self.refresh_button.setIcon(
             self.style().standardIcon(QStyle.StandardPixmap.SP_BrowserReload)
@@ -234,6 +268,8 @@ class FloatingWindow(QWidget):
         )
         for button in (
             self.contact_count_label,
+            self.auto_region_button,
+            self.region_button,
             self.pause_button,
             self.refresh_button,
             self.copy_button,
@@ -508,13 +544,13 @@ class FloatingWindow(QWidget):
             return
 
         if self.current_region is None:
-            self._show_waiting_for_region()
+            self.auto_detect_region()
             return
 
         if self.capture_in_progress:
             return
 
-        if self.refresh_worker is not None and self.refresh_worker.isRunning():
+        if self._has_running_worker():
             return
 
         region = self.current_region
@@ -522,6 +558,48 @@ class FloatingWindow(QWidget):
         self._set_status("识别中", "active")
         self.refresh_button.setEnabled(False)
         self._begin_capture_without_overlay(region)
+
+    def auto_detect_region(self) -> None:
+        if self.paused or self.capture_in_progress or self._has_running_worker():
+            return
+
+        self.current_region = None
+        self.current_page_signature = None
+        self.last_result = None
+        self.last_output_text = ""
+        self.refresh_started_at = time.perf_counter()
+        self._set_stats()
+        self._set_status("自动识别中", "active")
+        self.list_widget.clear()
+        self._add_info_card("正在自动查找当前页面的消息列表")
+        self.refresh_button.setEnabled(False)
+        self.auto_region_button.setEnabled(False)
+        self._begin_auto_detect_without_overlay()
+
+    def _begin_auto_detect_without_overlay(self) -> None:
+        self.capture_in_progress = True
+        self.capture_hidden_opacity = self.windowOpacity()
+        self.region_overlay.hide()
+        self.hide()
+        QTimer.singleShot(self.capture_delay_ms, self._capture_screen_for_auto_detect)
+
+    def _capture_screen_for_auto_detect(self) -> None:
+        try:
+            captured = self.pipeline.capture.capture_screen()
+        except Exception as exc:
+            LOGGER.exception("auto_capture_failed")
+            self._restore_after_capture()
+            self._on_auto_detect_failed(str(exc))
+            self._on_refresh_finished()
+            return
+
+        self._restore_after_capture()
+        self.auto_detect_worker = AutoDetectWorker(self.pipeline, captured)
+        self.auto_detect_worker.result_ready.connect(self._on_auto_detect_result)
+        self.auto_detect_worker.failed.connect(self._on_auto_detect_failed)
+        self.auto_detect_worker.finished.connect(self._on_refresh_finished)
+        self.auto_detect_worker.start()
+        self.refresh_timeout_timer.start(self.refresh_timeout_ms)
 
     def _begin_capture_without_overlay(self, region: Region) -> None:
         self.capture_in_progress = True
@@ -574,6 +652,41 @@ class FloatingWindow(QWidget):
             self.list_widget.clear()
             self._add_info_card("结果渲染失败", str(exc), "error")
 
+    def _on_auto_detect_result(self, detected, result: RecognitionResult) -> None:
+        self._stop_refresh_timeout()
+        self.current_region = detected.region
+        self.current_page_signature = None
+        LOGGER.info(
+            "auto_detect_ok region=%s score=%s reason=%s",
+            detected.region,
+            detected.score,
+            detected.reason,
+        )
+        self.region_overlay.show_region(detected.region)
+        try:
+            self._render_result(result)
+        except Exception as exc:
+            LOGGER.exception("auto_detect_render_failed region=%s", detected.region)
+            self._set_status("渲染失败", "error")
+            self.list_widget.clear()
+            self._add_info_card("结果渲染失败", str(exc), "error")
+
+    def _on_auto_detect_failed(self, message: str) -> None:
+        self._stop_refresh_timeout()
+        LOGGER.warning("auto_detect_failed elapsed_ms=%s message=%s", self._refresh_elapsed_ms(), message)
+        self.current_region = None
+        self.current_page_signature = None
+        self.last_result = None
+        self.last_output_text = ""
+        self._set_stats()
+        self._set_status("自动识别失败", "warning")
+        self.list_widget.clear()
+        self._add_info_card(
+            "未能自动找到消息列表",
+            f"{message}\n\n可以点击“选择区域”手动框选当前页面的列表。",
+            "warning",
+        )
+
     def _on_refresh_failed(self, region: Region, message: str) -> None:
         self._stop_refresh_timeout()
         LOGGER.error(
@@ -592,16 +705,19 @@ class FloatingWindow(QWidget):
         if elapsed_ms is not None:
             LOGGER.info("refresh_finished elapsed_ms=%s", elapsed_ms)
         self.refresh_button.setEnabled(True)
+        self.auto_region_button.setEnabled(True)
         self.refresh_worker = None
+        self.auto_detect_worker = None
         self.refresh_started_at = None
 
     def _on_refresh_timeout(self) -> None:
-        if self.refresh_worker is None or not self.refresh_worker.isRunning():
+        if not self._has_running_worker():
             return
 
         elapsed_ms = self._refresh_elapsed_ms()
         LOGGER.warning("refresh_timeout elapsed_ms=%s", elapsed_ms)
         self.refresh_button.setEnabled(True)
+        self.auto_region_button.setEnabled(True)
         self._set_status("识别较慢", "warning")
         self.list_widget.clear()
         self._add_info_card(
@@ -618,6 +734,15 @@ class FloatingWindow(QWidget):
         if self.refresh_started_at is None:
             return None
         return round((time.perf_counter() - self.refresh_started_at) * 1000)
+
+    def _has_running_worker(self) -> bool:
+        return (
+            self.refresh_worker is not None
+            and self.refresh_worker.isRunning()
+        ) or (
+            self.auto_detect_worker is not None
+            and self.auto_detect_worker.isRunning()
+        )
 
     def _render_result(self, result: RecognitionResult) -> None:
         elapsed_ms = self._refresh_elapsed_ms()
@@ -692,7 +817,7 @@ class FloatingWindow(QWidget):
         self.last_result = None
         self.last_output_text = ""
         self._add_info_card(
-            "点击“选择区域”，框选当前页面所需识别的列表",
+            "点击“自动识别”，自动查找当前页面的消息列表",
         )
 
     def _show_region_expired(self) -> None:

@@ -36,6 +36,19 @@ class FakePipeline:
     pass
 
 
+class FakeAutoCapture:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def capture_screen(self):
+        self.calls += 1
+
+
+class FakeAutoPipeline:
+    def __init__(self) -> None:
+        self.capture = FakeAutoCapture()
+
+
 def test_window_flags_include_native_minimize_button() -> None:
     app = QApplication.instance() or QApplication([])
     _ = app
@@ -59,7 +72,7 @@ def test_waiting_for_region_shows_single_instruction_card() -> None:
     assert widget is not None
     labels = widget.findChildren(floating_window.QLabel)
     texts = [label.text() for label in labels]
-    assert texts == ["点击“选择区域”，框选当前页面所需识别的列表"]
+    assert texts == ["点击“自动识别”，自动查找当前页面的消息列表"]
 
 
 def test_window_uses_compact_workspace_controls() -> None:
@@ -68,6 +81,7 @@ def test_window_uses_compact_workspace_controls() -> None:
     window = FloatingWindow(FakeConfigStore())
 
     assert window.findChildren(floating_window.QFrame, "StatsBar")
+    assert window.auto_region_button.toolTip()
     assert window.region_button.toolTip()
     assert window.pause_button.toolTip()
     assert window.refresh_button.toolTip()
@@ -217,3 +231,36 @@ def test_refresh_enters_capture_guard_before_ocr_worker(monkeypatch) -> None:
     assert not window.isVisible()
     assert window.refresh_worker is None
     assert scheduled
+
+
+def test_refresh_without_region_starts_auto_detection(monkeypatch) -> None:
+    app = QApplication.instance() or QApplication([])
+    _ = app
+    window = FloatingWindow(FakeConfigStore())
+    window.pipeline = FakeAutoPipeline()
+    scheduled = []
+    monkeypatch.setattr(
+        floating_window.QTimer,
+        "singleShot",
+        lambda delay, callback: scheduled.append((delay, callback)),
+    )
+
+    window.refresh_once()
+
+    assert window.capture_in_progress
+    assert not window.refresh_button.isEnabled()
+    assert not window.auto_region_button.isEnabled()
+    assert window.current_region is None
+    assert scheduled
+
+
+def test_auto_detect_failed_restores_waiting_state() -> None:
+    app = QApplication.instance() or QApplication([])
+    _ = app
+    window = FloatingWindow(FakeConfigStore())
+
+    window._on_auto_detect_failed("not found")
+
+    assert window.current_region is None
+    assert window.status_label.text() == "自动识别失败"
+    assert window.list_widget.count() == 1

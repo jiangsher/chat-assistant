@@ -5,6 +5,9 @@ from recognize.models.config import Region
 from recognize.models.recognition_result import RecognitionResult
 from recognize.recognition.ocr_engine import OcrEngine
 from recognize.recognition.parser import parse_candidate_cards
+from recognize.recognition.region_detector import DetectedRegion
+from recognize.recognition.region_detector import crop_detected_region
+from recognize.recognition.region_detector import detect_message_list_region
 from recognize.recognition.unread_detector import UnreadDetector
 
 
@@ -36,6 +39,23 @@ class RecognitionPipeline:
             cards=cards,
             raw_text_blocks=text_blocks,
         )
+
+    def detect_region_from_captured(self, captured: CapturedImage) -> DetectedRegion | None:
+        return detect_message_list_region(
+            captured,
+            self.ocr_engine,
+            badge_reader=self._read_badge_text,
+        )
+
+    def run_detected_from_captured(
+        self,
+        captured: CapturedImage,
+    ) -> tuple[DetectedRegion, RecognitionResult] | None:
+        detected = self.detect_region_from_captured(captured)
+        if detected is None:
+            return None
+        cropped = crop_detected_region(captured, detected)
+        return detected, self.run_captured(cropped)
 
     def _read_badge_text(self, image) -> str | None:
         import cv2
