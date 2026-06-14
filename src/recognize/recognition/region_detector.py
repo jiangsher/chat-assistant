@@ -59,7 +59,7 @@ def detect_message_list_region(
     candidates = _generate_candidates(image)
     best: DetectedRegion | None = None
 
-    for candidate in candidates[:8]:
+    for candidate in candidates[:6]:
         crop = _crop(image, candidate)
         if crop.size == 0:
             continue
@@ -82,6 +82,7 @@ def detect_message_list_region(
         )
         time_count = sum(1 for card in cards if card.time)
         title_count = sum(1 for card in cards if card.title)
+        template_bonus = 8 if any(card.title_label or card.time for card in cards) else 0
         score = (
             candidate.visual_score
             + len(cards) * 12
@@ -89,6 +90,7 @@ def detect_message_list_region(
             + unread_messages * 0.8
             + time_count * 2
             + title_count
+            + template_bonus
         )
         detected = DetectedRegion(
             region=Region(
@@ -102,6 +104,8 @@ def detect_message_list_region(
         )
         if best is None or detected.score > best.score:
             best = detected
+        if len(cards) >= 5 and score >= 95:
+            break
 
     if best is None or best.score < 16:
         return None
@@ -155,14 +159,31 @@ def _generate_candidates(image: np.ndarray) -> list[_CandidateRegion]:
             "red-badges",
         )
 
+    gray_regions = _gray_badge_regions(image)
+    if gray_regions:
+        x0 = min(region[0] for region in gray_regions)
+        y0 = min(region[1] for region in gray_regions)
+        x1 = max(region[2] for region in gray_regions)
+        y1 = max(region[3] for region in gray_regions)
+        add(
+            max(0, x0 - 330),
+            max(0, y0 - 140),
+            min(520, max(360, x1 - max(0, x0 - 330) + 60)),
+            min(height - max(0, y0 - 140), max(520, y1 - y0 + 260)),
+            18 + len(gray_regions) * 3,
+            "gray-badges",
+        )
+
+    for x, y, w, h, score in _vertical_list_panel_regions(image)[:4]:
+        add(x, y, w, h, score, "vertical-panel")
+
     panel_candidates = _light_panel_regions(image)
     for x, y, w, h, score in panel_candidates[:5]:
         add(x, y, w, h, score, "light-panel")
 
-    add(0, 0, min(width, max(420, round(width * 0.42))), height, 3, "left-band")
-    add(round(width * 0.28), 0, min(width, round(width * 0.48)), height, 2, "center-band")
-    add(round(width * 0.52), 0, width - round(width * 0.52), height, 2, "right-band")
-    add(0, 0, width, height, 1, "full-screen")
+    add(0, 0, min(width, max(420, round(width * 0.28))), height, 3, "left-band")
+    add(round(width * 0.28), 0, min(width - round(width * 0.28), 620), height, 2, "center-band")
+    add(round(width * 0.52), 0, min(width - round(width * 0.52), 720), height, 2, "right-band")
 
     candidates.sort(key=lambda item: item.visual_score, reverse=True)
     return candidates
@@ -182,6 +203,53 @@ def _red_badge_regions(image: np.ndarray) -> list[tuple[int, int, int, int]]:
     return regions
 
 
+def _gray_badge_regions(image: np.ndarray) -> list[tuple[int, int, int, int]]:
+    bgr = image[:, :, :3]
+    channels_close = (
+        (np.abs(bgr[:, :, 0].astype(np.int16) - bgr[:, :, 1].astype(np.int16)) < 14)
+        & (np.abs(bgr[:, :, 1].astype(np.int16) - bgr[:, :, 2].astype(np.int16)) < 14)
+    )
+    gray_mask = (
+        channels_close
+        & (bgr[:, :, 0] >= 145)
+        & (bgr[:, :, 0] <= 220)
+        & (bgr[:, :, 1] >= 145)
+        & (bgr[:, :, 1] <= 220)
+        & (bgr[:, :, 2] >= 145)
+        & (bgr[:, :, 2] <= 220)
+    ).astype(np.uint8) * 255
+    components, _, stats, _ = cv2.connectedComponentsWithStats(gray_mask, 8)
+    regions: list[tuple[int, int, int, int]] = []
+    for index in range(1, components):
+        x, y, w, h, area = stats[index]
+        if 60 <= area <= 1800 and 12 <= w <= 56 and 12 <= h <= 56:
+            aspect = w / max(h, 1)
+            if not 0.72 <= aspect <= 1.38:
+                continue
+            fill_ratio = area / max(w * h, 1)
+            if fill_ratio >= 0.42:
+                regions.append((int(x), int(y), int(x + w), int(y + h)))
+    return regions
+
+
+def _vertical_list_panel_regions(image: np.ndarray) -> list[tuple[int, int, int, int, float]]:
+    height, width = image.shape[:2]
+    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    edges = cv2.Canny(gray, 45, 120)
+    column_strength = edges.mean(axis=0)
+    candidates: list[tuple[int, int, int, int, float]] = []
+    min_x = max(260, round(width * 0.12))
+    max_x = min(round(width * 0.55), 760)
+    for divider_x in np.argsort(column_strength[min_x:max_x])[-12:]:
+        x = int(divider_x + min_x)
+        panel_width = x
+        if 300 <= panel_width <= 760:
+            score = 10 + float(column_strength[x]) / 8
+            candidates.append((0, 0, panel_width + 4, height, score))
+    candidates.sort(key=lambda item: item[4], reverse=True)
+    return candidates
+
+
 def _light_panel_regions(image: np.ndarray) -> list[tuple[int, int, int, int, float]]:
     hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
     mask = cv2.inRange(hsv, (0, 0, 215), (180, 55, 255))
@@ -193,7 +261,7 @@ def _light_panel_regions(image: np.ndarray) -> list[tuple[int, int, int, int, fl
     for contour in contours:
         x, y, w, h = cv2.boundingRect(contour)
         area = w * h
-        if area < image_area * 0.08 or w < 260 or h < 260:
+        if area < image_area * 0.08 or area > image_area * 0.75 or w < 260 or h < 260:
             continue
         ratio = h / max(w, 1)
         score = 4 + min(4, ratio)

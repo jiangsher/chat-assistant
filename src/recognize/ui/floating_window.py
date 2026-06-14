@@ -41,7 +41,6 @@ from recognize.recognition.pipeline import RecognitionPipeline
 from recognize.recognition.unread_detector import UnreadDetector
 from recognize.storage.config_store import ConfigStore
 from recognize.ui.region_overlay import RegionOverlay
-from recognize.ui.region_selector import RegionSelector
 from recognize.ui.styles import FLOATING_WINDOW_STYLESHEET
 
 LOGGER = logging.getLogger(__name__)
@@ -94,7 +93,7 @@ class AutoDetectWorker(QThread):
         try:
             detected_result = self.pipeline.run_detected_from_captured(self.captured)
             if detected_result is None:
-                self.failed.emit("未能自动找到消息列表，请点击“选择区域”手动框选。")
+                self.failed.emit("未能自动找到消息列表，请确认列表在当前屏幕中可见后重试。")
                 return
             detected, result = detected_result
             self.result_ready.emit(detected, result)
@@ -120,7 +119,7 @@ class FloatingWindow(QWidget):
         self.capture_in_progress = False
         self.capture_hidden_opacity = 1.0
         self.capture_delay_ms = 120
-        self.selection_previous_opacity = 1.0
+        self.auto_relocate_pending = False
         self.source_click_restore_ms = 180
         self.paused = False
         self.pipeline = RecognitionPipeline(
@@ -129,7 +128,7 @@ class FloatingWindow(QWidget):
             unread_detector=UnreadDetector(),
         )
 
-        self.status_label = QLabel("未选择区域")
+        self.status_label = QLabel("未自动识别")
         self.count_label = QLabel("未读：-")
         self.contact_count_label = QPushButton("联系人：-")
         self.updated_label = QLabel("更新：-")
@@ -141,10 +140,8 @@ class FloatingWindow(QWidget):
         self.refresh_button = QPushButton("刷新")
         self.pause_button = QPushButton("暂停")
         self.auto_region_button = QPushButton("自动识别")
-        self.region_button = QPushButton("选择区域")
         self.copy_button = QPushButton("复制")
         self.debug_button = QPushButton("调试")
-        self.region_selector: RegionSelector | None = None
         self.region_overlay = RegionOverlay()
 
         self._build_ui()
@@ -183,7 +180,6 @@ class FloatingWindow(QWidget):
         self.contact_count_label.setCursor(Qt.CursorShape.ArrowCursor)
 
         self.auto_region_button.setObjectName("PrimaryButton")
-        self.region_button.setObjectName("SecondaryButton")
         for button in (
             self.pause_button,
             self.refresh_button,
@@ -193,7 +189,6 @@ class FloatingWindow(QWidget):
             button.setObjectName("SecondaryButton")
 
         self.auto_region_button.setToolTip("自动查找当前页面的消息列表")
-        self.region_button.setToolTip("自动识别失败时，手动选择当前页面要识别的列表区域")
         self.pause_button.setToolTip("暂停或继续自动刷新")
         self.refresh_button.setToolTip("立即重新识别当前区域")
         self.copy_button.setToolTip("复制当前未读结果")
@@ -208,7 +203,6 @@ class FloatingWindow(QWidget):
         top_row = QHBoxLayout()
         top_row.setSpacing(8)
         top_row.addWidget(self.auto_region_button)
-        top_row.addWidget(self.region_button)
         top_row.addWidget(self.pause_button)
         top_row.addWidget(self.refresh_button)
         top_row.addWidget(self.copy_button)
@@ -238,7 +232,6 @@ class FloatingWindow(QWidget):
         self.refresh_button.clicked.connect(self.refresh_once)
         self.pause_button.clicked.connect(self.toggle_pause)
         self.auto_region_button.clicked.connect(self.auto_detect_region)
-        self.region_button.clicked.connect(self.select_region)
         self.copy_button.clicked.connect(self.copy_unread_results)
         self.debug_button.clicked.connect(self.toggle_debug_mode)
         self._sync_debug_button()
@@ -250,9 +243,6 @@ class FloatingWindow(QWidget):
         )
         self.auto_region_button.setIcon(
             self.style().standardIcon(QStyle.StandardPixmap.SP_ComputerIcon)
-        )
-        self.region_button.setIcon(
-            self.style().standardIcon(QStyle.StandardPixmap.SP_DialogOpenButton)
         )
         self.refresh_button.setIcon(
             self.style().standardIcon(QStyle.StandardPixmap.SP_BrowserReload)
@@ -269,7 +259,6 @@ class FloatingWindow(QWidget):
         for button in (
             self.contact_count_label,
             self.auto_region_button,
-            self.region_button,
             self.pause_button,
             self.refresh_button,
             self.copy_button,
@@ -386,7 +375,7 @@ class FloatingWindow(QWidget):
             return
 
         if self.current_region is None or self.last_result is None:
-            self._set_status("请先选择区域", "warning")
+            self._set_status("请先自动识别", "warning")
             return
 
         point = self._source_click_point(card)
@@ -507,37 +496,6 @@ class FloatingWindow(QWidget):
 
         QApplication.clipboard().setText(self.last_output_text)
         self._set_status("已复制", "success")
-
-    def select_region(self) -> None:
-        self._dim_for_region_selection()
-        self.region_selector = RegionSelector()
-        self.region_selector.region_selected.connect(self.set_region)
-        self.region_selector.selection_finished.connect(self._restore_after_region_selection)
-        self.region_selector.showFullScreen()
-
-    def set_region(self, region: Region) -> None:
-        self._restore_after_region_selection()
-        self.current_region = region
-        self.current_page_signature = None
-        self.config.selected_region = None
-        self.config_store.save(self.config)
-        self._set_status("已选择区域", "active")
-        self.list_widget.clear()
-        self._add_info_card(
-            "已选择当前页面区域",
-            f"区域：{region.x},{region.y} {region.width}x{region.height}。"
-            "更换页面后请重新点击“选择区域”。",
-        )
-        self.region_overlay.show_region(region)
-        self.refresh_once()
-
-    def _dim_for_region_selection(self) -> None:
-        self.selection_previous_opacity = self.windowOpacity()
-        self.setWindowOpacity(0.12)
-        self._set_status("选择区域中", "active")
-
-    def _restore_after_region_selection(self) -> None:
-        self.setWindowOpacity(self.selection_previous_opacity or 1.0)
 
     def refresh_once(self) -> None:
         if self.paused:
@@ -683,7 +641,7 @@ class FloatingWindow(QWidget):
         self.list_widget.clear()
         self._add_info_card(
             "未能自动找到消息列表",
-            f"{message}\n\n可以点击“选择区域”手动框选当前页面的列表。",
+            f"{message}\n\n请把消息列表保持在屏幕可见范围内，然后点击“自动识别”重试。",
             "warning",
         )
 
@@ -722,7 +680,7 @@ class FloatingWindow(QWidget):
         self.list_widget.clear()
         self._add_info_card(
             "识别耗时较长",
-            "请缩小区域或重新选择区域。后台识别完成后，仍会自动更新结果。",
+            "请保持消息列表在屏幕可见范围内，或点击“自动识别”重新定位。后台识别完成后，仍会自动更新结果。",
             "warning",
         )
 
@@ -763,7 +721,10 @@ class FloatingWindow(QWidget):
                 self.current_page_signature,
                 page_signature,
             )
-            self._show_region_expired()
+            self._schedule_auto_relocate(
+                "检测到页面或列表位置变化",
+                "正在重新自动查找当前页面的消息列表。",
+            )
             return
 
         if self.current_page_signature is None and page_signature is not None:
@@ -780,6 +741,11 @@ class FloatingWindow(QWidget):
         self.last_output_text = ""
 
         if not result.cards:
+            self._schedule_auto_relocate(
+                "当前区域没有解析出列表卡片",
+                "可能是消息列表移动了位置，正在重新自动查找。",
+            )
+            return
             self._show_no_cards(result.raw_text_blocks)
             if self.config.debug_mode:
                 self._add_debug_card(result, page_signature)
@@ -812,7 +778,7 @@ class FloatingWindow(QWidget):
 
     def _show_waiting_for_region(self) -> None:
         self._set_stats()
-        self._set_status("未选择区域", "neutral")
+        self._set_status("未自动识别", "neutral")
         self.list_widget.clear()
         self.last_result = None
         self.last_output_text = ""
@@ -831,9 +797,32 @@ class FloatingWindow(QWidget):
         self._add_info_card(
             "页面可能已变化",
             "检测到当前识别区域可能已经切换到其他页面。为避免把旧区域误当成新页面，"
-            "请点击“选择区域”重新框选当前列表。",
+            "请点击“自动识别”重新定位当前列表。",
             "warning",
         )
+
+    def _schedule_auto_relocate(self, title: str, body: str) -> None:
+        if self.auto_relocate_pending:
+            return
+
+        self.auto_relocate_pending = True
+        self.current_region = None
+        self.current_page_signature = None
+        self.last_result = None
+        self.last_output_text = ""
+        self._set_stats()
+        self._set_status("重新定位中", "active")
+        self.list_widget.clear()
+        self._add_info_card(title, body)
+        QTimer.singleShot(280, self._run_pending_auto_relocate)
+
+    def _run_pending_auto_relocate(self) -> None:
+        if self._has_running_worker() or self.capture_in_progress:
+            QTimer.singleShot(280, self._run_pending_auto_relocate)
+            return
+
+        self.auto_relocate_pending = False
+        self.auto_detect_region()
 
     def _show_no_cards(self, raw_text_blocks) -> None:
         if raw_text_blocks:
@@ -847,7 +836,7 @@ class FloatingWindow(QWidget):
         else:
             self._add_info_card(
                 "暂无 OCR 结果",
-                "请选择包含文字的候选人列表区域。",
+                "请确认消息列表在屏幕中可见，然后点击“自动识别”重试。",
                 "warning",
             )
 
@@ -856,10 +845,10 @@ class FloatingWindow(QWidget):
         codex_words = ("Codex", "recognition", "自动化", "插件", "对话", "新对话")
         boss_words = ("自拍馆", "前台", "日结", "包吃住", "未读", "沟通")
         if any(word in text for word in codex_words):
-            return "当前区域疑似选到了 Codex 窗口，请重新框选 BOSS 候选人消息列表。"
+            return "当前区域疑似选到了 Codex 窗口，请点击“自动识别”重新定位消息列表。"
         if not any(word in text for word in boss_words):
-            return "当前区域不像候选人列表，请重新选择包含姓名、岗位、消息、时间的列表区域。"
-        return "请重新选择 BOSS 右侧候选人列表区域，尽量从“全部/未读”下面框到列表底部。"
+            return "当前区域不像候选人列表，请确认包含姓名、岗位、消息、时间的列表在屏幕中可见。"
+        return "请点击“自动识别”重新定位 BOSS 右侧候选人列表区域。"
 
     def _sync_debug_button(self) -> None:
         self.debug_button.setText("调试开" if self.config.debug_mode else "调试")

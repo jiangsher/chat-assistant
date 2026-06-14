@@ -1,5 +1,10 @@
 from recognize.models.recognition_result import TextBlock
-from recognize.recognition.parser import clean_text, detect_app_template, parse_candidate_cards
+from recognize.recognition.parser import (
+    clean_text,
+    detect_app_template,
+    extract_unread_badge,
+    parse_candidate_cards,
+)
 import numpy as np
 
 
@@ -297,3 +302,19 @@ def test_qq_template_uses_right_side_badges_and_ignores_avatar_badge_false_posit
     assert not by_name["22届350"].unread
     assert by_name["安徽农业大学互帮.."].unread
     assert by_name["安徽农业大学互帮.."].unread_badge == "53"
+
+
+def test_extract_unread_badge_accepts_avatar_top_right_dot() -> None:
+    image = np.zeros((120, 180, 3), dtype=np.uint8)
+    name_bbox = (90, 50, 160, 76)
+    image[42:55, 70:83] = [0, 0, 255]
+
+    assert extract_unread_badge(image, name_bbox) == "1"
+
+
+def test_extract_unread_badge_rejects_red_pixels_inside_avatar() -> None:
+    image = np.zeros((120, 180, 3), dtype=np.uint8)
+    name_bbox = (90, 50, 160, 76)
+    image[62:84, 43:61] = [0, 0, 255]
+
+    assert extract_unread_badge(image, name_bbox) is None

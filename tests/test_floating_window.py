@@ -82,7 +82,6 @@ def test_window_uses_compact_workspace_controls() -> None:
 
     assert window.findChildren(floating_window.QFrame, "StatsBar")
     assert window.auto_region_button.toolTip()
-    assert window.region_button.toolTip()
     assert window.pause_button.toolTip()
     assert window.refresh_button.toolTip()
     assert window.copy_button.toolTip()
@@ -195,22 +194,6 @@ def test_refresh_failed_stops_timeout_and_shows_error() -> None:
     assert window.list_widget.count() == 1
 
 
-def test_region_selection_temporarily_dims_and_restores_window() -> None:
-    app = QApplication.instance() or QApplication([])
-    _ = app
-    window = FloatingWindow(FakeConfigStore())
-    window.setWindowOpacity(0.8)
-
-    window._dim_for_region_selection()
-
-    assert window.windowOpacity() <= 0.2
-    assert window.status_label.text() == "选择区域中"
-
-    window._restore_after_region_selection()
-
-    assert abs(window.windowOpacity() - 0.8) < 0.01
-
-
 def test_refresh_enters_capture_guard_before_ocr_worker(monkeypatch) -> None:
     app = QApplication.instance() or QApplication([])
     _ = app
@@ -264,3 +247,28 @@ def test_auto_detect_failed_restores_waiting_state() -> None:
     assert window.current_region is None
     assert window.status_label.text() == "自动识别失败"
     assert window.list_widget.count() == 1
+
+
+def test_result_without_cards_schedules_auto_relocation(monkeypatch) -> None:
+    app = QApplication.instance() or QApplication([])
+    _ = app
+    window = FloatingWindow(FakeConfigStore())
+    window.current_region = Region(x=10, y=20, width=300, height=400)
+    scheduled = []
+    monkeypatch.setattr(
+        floating_window.QTimer,
+        "singleShot",
+        lambda delay, callback: scheduled.append((delay, callback)),
+    )
+    result = RecognitionResult(
+        region=window.current_region,
+        raw_text_blocks=[TextBlock(text="聊天记录", bbox=(20, 20, 100, 48))],
+        cards=[],
+    )
+
+    window._render_result(result)
+
+    assert window.current_region is None
+    assert window.auto_relocate_pending
+    assert window.status_label.text() == "重新定位中"
+    assert scheduled

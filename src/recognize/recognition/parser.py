@@ -449,7 +449,20 @@ def detect_app_template(text_blocks: list[TextBlock]) -> str | None:
         )
     ):
         return "qq"
-    if any(keyword in text for keyword in ("自拍馆", "前台", "日结", "包吃住")):
+    if any(
+        keyword in text
+        for keyword in (
+            "自拍馆",
+            "前台",
+            "日结",
+            "包吃住",
+            "招聘者",
+            "人事经理",
+            "人力资源",
+            "个人简历",
+            "HR",
+        )
+    ):
         return "boss"
     return None
 
@@ -934,10 +947,11 @@ def preferred_separate_badge_component(
 ) -> tuple[int, int, int, int, int] | None:
     candidates: list[tuple[int, int, int, int, int]] = []
     for component in components:
-        x, _, width, height, _ = component
+        x, y, width, height, _ = component
         touches_crop_edge = x <= 5
         badge_sized = 10 <= width <= 32 and 10 <= height <= 32 and width * height >= 120
-        if badge_sized and not touches_crop_edge:
+        near_avatar_top = y <= 22
+        if badge_sized and near_avatar_top and not touches_crop_edge:
             candidates.append(component)
 
     if not candidates:

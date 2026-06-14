@@ -7,6 +7,7 @@ from recognize.models.config import Region
 from recognize.models.recognition_result import TextBlock
 from recognize.recognition.region_detector import crop_detected_region
 from recognize.recognition.region_detector import detect_message_list_region
+from recognize.recognition.region_detector import _generate_candidates
 
 
 class FakeOcrEngine:
@@ -58,6 +59,39 @@ def test_detect_message_list_region_scores_candidate_with_cards() -> None:
     assert "cards=" in detected.reason
 
 
+def test_gray_badges_create_narrow_left_list_candidate() -> None:
+    image = np.full((720, 1200, 3), 248, dtype=np.uint8)
+    image[:, :410] = 242
+    image[:, 410:414] = 225
+    for y in (120, 220, 360):
+        cv2_circle(image, 350, y, 15, (180, 180, 180))
+    image[95:118, 520:580] = (220, 220, 220)
+
+    candidates = _generate_candidates(image)
+
+    assert candidates[0].reason == "gray-badges"
+    assert 0 <= candidates[0].x <= 30
+    assert candidates[0].width <= 430
+
+
+def test_vertical_panel_candidate_can_cover_wide_left_list() -> None:
+    image = np.full((720, 1400, 3), 248, dtype=np.uint8)
+    image[:, :660] = 255
+    image[:, 660:664] = 205
+    image[:, 664:] = 246
+    for y in (80, 180, 300, 420):
+        cv2_circle(image, 80, y, 28, (220, 220, 220))
+
+    candidates = _generate_candidates(image)
+
+    wide_panels = [
+        candidate
+        for candidate in candidates
+        if candidate.reason == "vertical-panel" and 640 <= candidate.width <= 690
+    ]
+    assert wide_panels
+
+
 def test_detect_message_list_region_ignores_self_window_text() -> None:
     image = np.full((500, 700, 3), 255, dtype=np.uint8)
     captured = CapturedImage(region=Region(x=0, y=0, width=700, height=500), pixels=image)
@@ -79,3 +113,15 @@ def test_crop_detected_region_returns_screen_relative_crop() -> None:
 
     assert cropped.region == detected_region
     assert cropped.pixels.shape[:2] == (20, 30)
+
+
+def cv2_circle(
+    image: np.ndarray,
+    x: int,
+    y: int,
+    radius: int,
+    color: tuple[int, int, int],
+) -> None:
+    import cv2
+
+    cv2.circle(image, (x, y), radius, color, -1)
